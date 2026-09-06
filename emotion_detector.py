@@ -1,6 +1,6 @@
 """
 emotion_detector.py
-Real-time affect detection for Desk Buddy using a fine-tuned DistilRoBERTa
+Real-time affect detection for LUCIDA using a fine-tuned DistilRoBERTa
 emotion classifier: `j-hartmann/emotion-english-distilroberta-base`
 (7-way: anger, disgust, fear, joy, neutral, sadness, surprise).
 
@@ -16,6 +16,23 @@ mode — a short rolling window has to actually trend that way first.
 """
 
 from __future__ import annotations
+
+import logging
+import os
+import warnings
+
+# Quiet the very noisy (but harmless) startup logging from TensorFlow/
+# transformers/absl that this model pulls in — none of it is an error, it's
+# just verbose-by-default library chatter. Must be set BEFORE `transformers`
+# (which pulls in tf_keras/tensorflow) is imported below.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")       # 0=all .. 3=errors only
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 from collections import deque
 from dataclasses import dataclass
