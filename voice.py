@@ -10,8 +10,14 @@ base app never breaks if they're missing — it just tells you what to install.
 
 import os
 import tempfile
+import warnings
 
 import streamlit.components.v1 as components
+
+# The optional faster-whisper/ctranslate2 stack prints a noisy (harmless)
+# pkg_resources deprecation warning on import — silence just that one so it
+# doesn't clutter the terminal every time the sidebar checks availability.
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated.*")
 
 
 def speak_button(text: str, key: str):
