@@ -1,0 +1,26 @@
+{
+  "facts": [],
+  "long_term_summary": "",
+  "stats": {
+    "total_messages": 9,
+    "quiz_correct": 0,
+    "quiz_total": 0,
+    "last_active": "2026-09-07",
+    "streak_days": 1
+  },
+  "expenses": [
+    {
+      "date": "2026-09-07",
+      "category": "Food & Groceries",
+      "amount": 20.0,
+      "note": "chips"
+    },
+    {
+      "date": "2026-09-07",
+      "category": "Subscriptions",
+      "amount": 200.0,
+      "note": "netflix"
+    }
+  ],
+  "monthly_budget": null
+}
