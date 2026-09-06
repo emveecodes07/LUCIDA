@@ -1,5 +1,5 @@
 """
-Desk Buddy — a local, Ollama-powered study & emotional-support companion.
+LUCIDA — a local, Ollama-powered study & emotional-support companion.
 Fully offline: the chat model runs on your own machine through Ollama, the
 emotion classifier and document parsing run on-device, and nothing is ever
 sent to a cloud API.
@@ -10,6 +10,7 @@ Run:
 """
 
 import os
+from datetime import date, timedelta
 
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
@@ -21,15 +22,21 @@ import memory as mem
 import voice
 import timer
 from emotion_detector import EmotionEngine, EMOTION_EMOJI
-from personas import PERSONAS, DEFAULT_PERSONA, SELECTABLE_PERSONAS, suggest_alternate_persona
+from personas import (
+    PERSONAS, DEFAULT_PERSONA, SELECTABLE_PERSONAS,
+    suggest_alternate_persona, is_life_chatter,
+)
 
-MEMORY_PATH = os.path.join(os.path.dirname(__file__), "desk_buddy_memory.json")
+MEMORY_PATH = os.path.join(os.path.dirname(__file__), "lucida_memory.json")
 HISTORY_TRIM_AT = 24        # rewrite older turns into a rolling summary past this many messages
 KEEP_RECENT_MESSAGES = 8    # how many raw turns stay verbatim after a summary rollup
 STRESS_THRESHOLD = 0.55     # rolling average stress score that auto-triggers De-escalation
 KEEP_ALIVE = "30m"          # keeps the Ollama model resident between messages — no reload lag
-N_QUIZ_QUESTIONS = 4
-N_FLASHCARDS = 8
+N_QUIZ_QUESTIONS = 5
+N_FLASHCARDS = 10
+STUDY_PACK_MAX_TOKENS = 3200  # bumped for the fuller pack shape (tldr, prerequisites, analogies,
+                              # mnemonics, real-world applications, study plan, + 10 cards)
+SRS_INTERVALS_DAYS = [1, 3, 7, 16]  # lightweight spaced-repetition schedule for flashcards
 
 
 @st.cache_resource(show_spinner="Loading emotion model (first run only)...")
@@ -60,10 +67,25 @@ def cached_ollama_status(base_url: str):
     return llm.check_ollama_status(base_url)
 
 
+@st.cache_data(show_spinner=False)
+def cached_extract_text(fingerprint: str, filename: str, file_bytes: bytes) -> str:
+    """
+    Parsing a PDF/PPTX/DOCX isn't free, and Streamlit reruns the script on
+    every interaction — cache by content fingerprint so re-rendering the page
+    (switching tabs, tweaking a sidebar setting) never re-parses a file we've
+    already read. Keyed on the hash, not the filename, so a re-upload of the
+    identical file is a free cache hit even under a different name.
+    """
+    import io
+    buf = io.BytesIO(file_bytes)
+    buf.name = filename
+    return docs.extract_text(buf)
+
+
 # ----------------------------------------------------------------------------
 # Page setup & styling
 # ----------------------------------------------------------------------------
-st.set_page_config(page_title="Desk Buddy", page_icon="🦉", layout="wide")
+st.set_page_config(page_title="LUCIDA", page_icon="🦉", layout="wide")
 
 st.markdown(
     """
@@ -86,6 +108,8 @@ st.markdown(
         .mode-study      { background: linear-gradient(135deg, #dfe6e9, #b2bec3); color: #2d3436; }
         .mode-focus      { background: linear-gradient(135deg, #a29bfe, #6c5ce7); color: #ffffff; }
         .mode-brainstorm { background: linear-gradient(135deg, #ffd6a5, #ff9f43); color: #6b3600; }
+        .mode-devil      { background: linear-gradient(135deg, #2d3436, #636e72); color: #ffffff; }
+        .mode-finance    { background: linear-gradient(135deg, #55efc4, #00b894); color: #063d2f; }
         .mode-alert      { background: linear-gradient(135deg, #ff7675, #e84393); color: #ffffff;
                             animation: pulse-alert 1.6s ease-in-out infinite; }
         @keyframes pulse-alert {
@@ -124,13 +148,113 @@ st.markdown(
         .mood-readout { font-size: 0.85rem; opacity: 0.75; margin: -6px 0 10px 0; }
 
         div[data-testid="stExpander"] { border-radius: 12px; overflow: hidden; }
-        section[data-testid="stSidebar"] .stRadio label { font-size: 0.93rem; }
-        section[data-testid="stSidebar"] { border-right: 1px solid rgba(0,0,0,0.06); }
 
         .stButton button, .stChatInput { border-radius: 10px !important; }
-        div[data-testid="stChatMessage"] {
-            border-radius: 14px; padding: 2px 4px; transition: background 0.15s ease;
+        .stButton button {
+            transition: transform 0.12s ease, box-shadow 0.12s ease;
+            border: 1px solid rgba(0,0,0,0.06) !important;
         }
+        .stButton button:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0,0,0,0.12); }
+        .stButton button:active { transform: translateY(0); }
+
+        div[data-testid="stChatMessage"] {
+            border-radius: 16px; padding: 10px 4px; margin-bottom: 2px;
+            transition: background 0.15s ease;
+        }
+
+        /* Tabs — pill-style, clearer active state */
+        button[data-baseweb="tab"] {
+            border-radius: 10px 10px 0 0 !important; font-weight: 600 !important;
+            padding: 8px 16px !important;
+        }
+        div[data-baseweb="tab-highlight"] { background: #6c5ce7 !important; height: 3px !important; }
+
+        /* Sidebar — set BOTH background and text color explicitly. The old
+           rule only set a near-white background; on Streamlit's dark theme
+           (the default for many users) the default text stays white, which
+           made the sidebar unreadable. Forcing an explicit dark background
+           with light text makes it visible under either theme. */
+        section[data-testid="stSidebar"],
+        [data-testid="stSidebarContent"] {
+            background: linear-gradient(180deg, #241b4e 0%, #150f30 100%) !important;
+            border-right: 1px solid rgba(0,0,0,0.35);
+        }
+        section[data-testid="stSidebar"] * { color: #f1eefc !important; }
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3 { font-weight: 800; letter-spacing: -0.01em; color: #ffffff !important; }
+        section[data-testid="stSidebar"] .stRadio label { font-size: 0.93rem; }
+        section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.16) !important; }
+
+        /* Elements that carry their OWN light background need dark text kept
+           dark, or they become invisible against themselves. */
+        section[data-testid="stSidebar"] .stat-pill,
+        section[data-testid="stSidebar"] .stat-pill * {
+            color: #2d3436 !important;
+            background: linear-gradient(135deg, #f1f2f6, #dfe6e9) !important;
+        }
+        section[data-testid="stSidebar"] .status-online { color: #55efc4 !important; }
+        section[data-testid="stSidebar"] .status-offline { color: #ff7675 !important; }
+
+        /* Inputs/selects keep a light field so typed text stays legible. */
+        section[data-testid="stSidebar"] div[data-baseweb="input"],
+        section[data-testid="stSidebar"] div[data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] div[data-baseweb="textarea"] {
+            background: #f5f3ff !important;
+        }
+        section[data-testid="stSidebar"] input,
+        section[data-testid="stSidebar"] textarea,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] * {
+            color: #1e1b2e !important;
+        }
+
+        /* Buttons — solid, high-contrast, matches the app's accent purple. */
+        section[data-testid="stSidebar"] .stButton button {
+            background: #6c5ce7 !important; color: #ffffff !important;
+            border: 1px solid rgba(255,255,255,0.15) !important;
+        }
+        section[data-testid="stSidebar"] .stButton button:hover { background: #8073ee !important; }
+
+        /* Expanders — subtle contrast against the dark sidebar background. */
+        section[data-testid="stSidebar"] div[data-testid="stExpander"] {
+            background: rgba(255,255,255,0.05) !important;
+            border: 1px solid rgba(255,255,255,0.14) !important;
+        }
+
+        /* Toggle / checkbox tracks so their state is visible on dark bg. */
+        section[data-testid="stSidebar"] [data-baseweb="checkbox"] div[role="checkbox"] {
+            border-color: rgba(255,255,255,0.4) !important;
+        }
+
+        /* Headline / title area */
+        h1, h2, h3 { letter-spacing: -0.01em; }
+
+        /* Progress bars (rolling stress, etc.) — rounder, gradient fill */
+        div[data-testid="stProgress"] > div > div {
+            background: linear-gradient(90deg, #74b9ff, #6c5ce7) !important;
+            border-radius: 8px !important;
+        }
+        div[data-testid="stProgress"] > div { border-radius: 8px !important; background: #e8eaf0 !important; }
+
+        /* Expanders — subtle card feel */
+        div[data-testid="stExpander"] {
+            border: 1px solid rgba(0,0,0,0.06); box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+        }
+
+        /* Inputs */
+        div[data-baseweb="input"], div[data-baseweb="select"] > div, div[data-baseweb="textarea"] {
+            border-radius: 9px !important;
+        }
+
+        /* Alerts (info/warning/success/error) — softer corners, small lift */
+        div[data-testid="stAlert"] {
+            border-radius: 12px !important; box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+
+        /* Scrollbar polish (webkit) */
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-thumb { background: #c8cdd6; border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: #a4aab5; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -157,6 +281,14 @@ if "flash_idx" not in st.session_state:
     st.session_state.flash_idx = 0
 if "flash_show_answer" not in st.session_state:
     st.session_state.flash_show_answer = False
+if "flash_srs" not in st.session_state:
+    st.session_state.flash_srs = {}  # card index -> {"box": int, "next_due": "YYYY-MM-DD"}
+if "flash_filter_due" not in st.session_state:
+    st.session_state.flash_filter_due = False
+if "study_plan_done" not in st.session_state:
+    st.session_state.study_plan_done = {}  # day int -> bool
+if "expense_form_nonce" not in st.session_state:
+    st.session_state.expense_form_nonce = 0
 if "memory" not in st.session_state:
     st.session_state.memory = mem.touch_streak(mem.load_memory(MEMORY_PATH))
     mem.save_memory(MEMORY_PATH, st.session_state.memory)
@@ -170,7 +302,7 @@ emotion_engine = get_emotion_engine()
 # expanders so the sidebar reads clean at a glance.
 # ----------------------------------------------------------------------------
 with st.sidebar:
-    st.header("🦉 Desk Buddy")
+    st.header("🦉 LUCIDA")
 
     if "persona_radio" not in st.session_state:
         st.session_state.persona_radio = DEFAULT_PERSONA
@@ -183,7 +315,7 @@ with st.sidebar:
 
     if active_mode in ("Study Mode", "Deep Focus Mode"):
         with st.expander("⏱️ Pomodoro & stopwatch", expanded=False):
-            timer.render_pomodoro_and_stopwatch(work_minutes=25, break_minutes=5, key="deskbuddy_timer")
+            timer.render_pomodoro_and_stopwatch(work_minutes=25, break_minutes=5, key="lucida_timer")
 
     st.divider()
 
@@ -422,13 +554,23 @@ def render_chat_panel(doc_context: str) -> None:
     # while De-escalation is active; that override always takes priority.
     if live_persona_name != "De-escalation":
         suggested = suggest_alternate_persona(user_prompt, active_mode)
-        if suggested:
+        study_zone = active_mode in ("Study Mode", "Deep Focus Mode")
+        offtopic_in_study_zone = study_zone and is_life_chatter(user_prompt)
+        if suggested or offtopic_in_study_zone:
+            # In Study/Deep Focus, non-academic content gets a firmer nudge —
+            # the persona itself will also decline to engage with it (see its
+            # SCOPE rule), so make the redirect obvious rather than easy to miss.
+            suggested = suggested or "Casual Emotion Mode"
             sug_label = PERSONAS[suggested]["sidebar_label"]
             sug_col, btn_col = st.columns([5, 2])
             with sug_col:
-                st.info(f"💡 This sounds like a good fit for **{sug_label}** — want to switch?")
+                if offtopic_in_study_zone:
+                    st.warning(f"🎯 This isn't study-related — **{sug_label}** is a better place "
+                               f"for it. {live_persona['label'].title()} will keep it brief.")
+                else:
+                    st.info(f"💡 This sounds like a good fit for **{sug_label}** — want to switch?")
             with btn_col:
-                if st.button(f"Switch", use_container_width=True, key="switch_suggestion_btn"):
+                if st.button("Switch", use_container_width=True, key="switch_suggestion_btn"):
                     st.session_state.persona_radio = suggested
                     st.rerun()
 
@@ -475,13 +617,15 @@ def render_study_pack_tab() -> None:
             else:
                 try:
                     with st.spinner("Extracting text..."):
-                        text = docs.extract_text(uploaded_file)
-                    with st.spinner("Building your study pack — summary, overview, keywords, "
-                                     "flashcards, and a quiz, in one pass..."):
+                        text = cached_extract_text(fingerprint, uploaded_file.name, uploaded_file.getvalue())
+                    with st.spinner(f"Building your study pack — overview, summary, keywords, "
+                                     f"analogies, mnemonics, common mistakes, real-world links, a "
+                                     f"study plan, {N_FLASHCARDS} flashcards, practice questions, "
+                                     f"and a {N_QUIZ_QUESTIONS}-question quiz, in one pass..."):
                         raw = llm.complete(
                             base_url, model_name, "You output only valid JSON, nothing else.",
                             docs.build_study_pack_prompt(text, n_quiz=N_QUIZ_QUESTIONS, n_flashcards=N_FLASHCARDS),
-                            max_tokens=1400, keep_alive=KEEP_ALIVE,
+                            max_tokens=STUDY_PACK_MAX_TOKENS, keep_alive=KEEP_ALIVE,
                         )
                         pack = docs.parse_study_pack_json(raw)
                     if not pack or not (pack.get("summary") or pack.get("quiz")):
@@ -494,6 +638,9 @@ def render_study_pack_tab() -> None:
                         st.session_state.pack_quiz_answered = {}
                         st.session_state.flash_idx = 0
                         st.session_state.flash_show_answer = False
+                        st.session_state.flash_srs = {}
+                        st.session_state.flash_filter_due = False
+                        st.session_state.study_plan_done = {}
                         st.toast("Study pack ready!", icon="✅")
                         st.rerun()
                 except ValueError as e:
@@ -502,13 +649,34 @@ def render_study_pack_tab() -> None:
                     st.error(str(e))
 
     pack = st.session_state.study_pack
-    tab_overview, tab_flash, tab_quiz = st.tabs(["🧭 Overview & summary", "🗂️ Flashcards", "❓ Quiz"])
+    tab_overview, tab_plan, tab_flash, tab_quiz = st.tabs(
+        ["🧭 Overview & summary", "🗓️ Study plan", "🗂️ Flashcards", "❓ Quiz"]
+    )
 
     with tab_overview:
         if pack:
+            badges = []
+            if pack.get("difficulty"):
+                badges.append(f'<span class="stat-pill">🎚️ {pack["difficulty"]}</span>')
+            if pack.get("est_study_minutes"):
+                badges.append(f'<span class="stat-pill">⏳ ~{pack["est_study_minutes"]} min</span>')
+            if pack.get("flashcards"):
+                badges.append(f'<span class="stat-pill">🗂️ {len(pack["flashcards"])} cards</span>')
+            if pack.get("quiz"):
+                badges.append(f'<span class="stat-pill">❓ {len(pack["quiz"])} quiz Qs</span>')
+            if badges:
+                st.markdown(" ".join(badges), unsafe_allow_html=True)
+
+            if pack.get("tldr"):
+                st.markdown(f'💡 **TL;DR (last-minute cram):** {pack["tldr"]}')
+
             if pack.get("overview"):
                 st.markdown("#### 🧭 Overview")
                 st.markdown(f'<div class="summary-card">{pack["overview"]}</div>', unsafe_allow_html=True)
+            if pack.get("prerequisites"):
+                st.markdown("#### 🧱 Prerequisites")
+                for p in pack["prerequisites"]:
+                    st.markdown(f"- {p}")
             if pack.get("summary"):
                 st.markdown("#### 📝 High-yield summary")
                 for b in pack["summary"]:
@@ -523,29 +691,122 @@ def render_study_pack_tab() -> None:
                     " ".join(f'<span class="stat-pill">{k}</span>' for k in pack["keywords"]),
                     unsafe_allow_html=True,
                 )
+            if pack.get("analogies"):
+                st.markdown("#### 🌉 Analogies")
+                for a in pack["analogies"]:
+                    st.markdown(f"- **{a['concept']}** — {a['analogy']}")
+            if pack.get("mnemonics"):
+                st.markdown("#### 🧠 Memory tricks")
+                for m in pack["mnemonics"]:
+                    st.markdown(f"- **{m['term']}** — {m['device']}")
+            if pack.get("common_mistakes"):
+                st.markdown("#### ⚠️ Common mistakes")
+                for m in pack["common_mistakes"]:
+                    st.markdown(f"- {m}")
+            if pack.get("real_world_applications"):
+                st.markdown("#### 🌍 Real-world applications")
+                for a in pack["real_world_applications"]:
+                    st.markdown(f"- {a}")
+            if pack.get("practice_questions"):
+                st.markdown("#### ✍️ Practice questions (self-testing, no multiple choice)")
+                for i, q in enumerate(pack["practice_questions"], 1):
+                    with st.expander(f"Q{i}. {q}"):
+                        st.caption("Try answering out loud or on paper before checking your notes/flashcards.")
+
+            st.divider()
+            st.download_button(
+                "⬇️ Download full study pack (Markdown)",
+                data=docs.study_pack_to_markdown(pack, title=uploaded_file.name if uploaded_file else "Study Pack"),
+                file_name="study_pack.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
         else:
             st.caption("Upload a file and build a study pack to see your overview here.")
+
+    with tab_plan:
+        plan = pack.get("study_plan", [])
+        if plan:
+            st.caption("Check off each session as you go — pace it out instead of cramming everything at once.")
+            for i, d in enumerate(plan):
+                # Keyed on the entry's position (i), not d["day"]: the model can
+                # (and sometimes does) emit more than one plan entry with the same
+                # "day" number, which previously produced duplicate Streamlit
+                # widget keys and crashed the tab with StreamlitDuplicateElementKey.
+                # The position is always unique within a single pack, so it's a
+                # safe widget key regardless of what "day" values come back.
+                day_key = f"{d['day']}_{i}"
+                mins = f" · ~{d['minutes']} min" if d.get("minutes") else ""
+                done = st.checkbox(
+                    f"Day {d['day']}{mins} — {d['focus']}",
+                    value=st.session_state.study_plan_done.get(day_key, False),
+                    key=f"plan_day_{day_key}",
+                )
+                st.session_state.study_plan_done[day_key] = done
+            done_count = sum(1 for v in st.session_state.study_plan_done.values() if v)
+            if plan:
+                st.progress(done_count / len(plan), text=f"{done_count}/{len(plan)} sessions done")
+        else:
+            st.caption("Build a study pack to get a paced, session-by-session study plan here.")
 
     with tab_flash:
         cards = pack.get("flashcards", [])
         if cards:
-            idx = st.session_state.flash_idx % len(cards)
-            card = cards[idx]
-            st.caption(f"Card {idx + 1} of {len(cards)}")
-            face = card["back"] if st.session_state.flash_show_answer else card["front"]
-            st.markdown(f'<div class="flash-card">{face}</div>', unsafe_allow_html=True)
-            c1, c2, c3 = st.columns(3)
-            if c1.button("⬅️ Prev", use_container_width=True, key="flash_prev"):
-                st.session_state.flash_idx = (idx - 1) % len(cards)
-                st.session_state.flash_show_answer = False
-                st.rerun()
-            if c2.button("🔄 Flip", use_container_width=True, key="flash_flip"):
-                st.session_state.flash_show_answer = not st.session_state.flash_show_answer
-                st.rerun()
-            if c3.button("Next ➡️", use_container_width=True, key="flash_next"):
-                st.session_state.flash_idx = (idx + 1) % len(cards)
-                st.session_state.flash_show_answer = False
-                st.rerun()
+            today = date.today().isoformat()
+
+            def _is_due(i: int) -> bool:
+                info = st.session_state.flash_srs.get(str(i))
+                return not info or info.get("next_due", today) <= today
+
+            st.toggle("Show only cards due for review", key="flash_filter_due")
+            visible = [i for i in range(len(cards)) if _is_due(i)] if st.session_state.flash_filter_due else list(range(len(cards)))
+
+            if not visible:
+                st.success("Nothing due right now — nice work! Come back later or turn off the filter.")
+            else:
+                if st.session_state.flash_idx not in visible:
+                    st.session_state.flash_idx = visible[0]
+                pos = visible.index(st.session_state.flash_idx) if st.session_state.flash_idx in visible else 0
+                idx = visible[pos]
+                card = cards[idx]
+                box_info = st.session_state.flash_srs.get(str(idx), {"box": 0})
+                st.caption(f"Card {pos + 1} of {len(visible)} shown"
+                           + (f" · box {box_info['box'] + 1}/{len(SRS_INTERVALS_DAYS)}" if box_info["box"] else ""))
+                face = card["back"] if st.session_state.flash_show_answer else card["front"]
+                st.markdown(f'<div class="flash-card">{face}</div>', unsafe_allow_html=True)
+
+                nav1, nav2, nav3 = st.columns(3)
+                if nav1.button("⬅️ Prev", use_container_width=True, key="flash_prev"):
+                    st.session_state.flash_idx = visible[(pos - 1) % len(visible)]
+                    st.session_state.flash_show_answer = False
+                    st.rerun()
+                if nav2.button("🔄 Flip", use_container_width=True, key="flash_flip"):
+                    st.session_state.flash_show_answer = not st.session_state.flash_show_answer
+                    st.rerun()
+                if nav3.button("Next ➡️", use_container_width=True, key="flash_next"):
+                    st.session_state.flash_idx = visible[(pos + 1) % len(visible)]
+                    st.session_state.flash_show_answer = False
+                    st.rerun()
+
+                st.caption("Rate yourself — this schedules when the card comes back around.")
+                rate1, rate2 = st.columns(2)
+
+                def _schedule(card_idx: int, box_delta: int):
+                    info = st.session_state.flash_srs.get(str(card_idx), {"box": 0})
+                    new_box = max(0, min(len(SRS_INTERVALS_DAYS) - 1, info["box"] + box_delta))
+                    next_due = date.today() + timedelta(days=SRS_INTERVALS_DAYS[new_box])
+                    st.session_state.flash_srs[str(card_idx)] = {
+                        "box": new_box, "next_due": next_due.isoformat(),
+                    }
+                    st.session_state.flash_idx = visible[(pos + 1) % len(visible)]
+                    st.session_state.flash_show_answer = False
+
+                if rate1.button("😅 Still learning", use_container_width=True, key="flash_again"):
+                    _schedule(idx, -1)
+                    st.rerun()
+                if rate2.button("✅ Know it", use_container_width=True, key="flash_know"):
+                    _schedule(idx, +1)
+                    st.rerun()
         else:
             st.caption("Build a study pack to generate flashcards from your material.")
 
@@ -582,10 +843,84 @@ def render_study_pack_tab() -> None:
                 st.caption("No upload needed — type any topic above and generate a quiz on the spot.")
 
 
+def render_expense_tracker_tab() -> str:
+    """Logs spending locally (in lucida_memory.json) and returns a plain-
+    text summary to hand the Financial Advisor persona as chat context, so
+    its advice is grounded in the user's real numbers instead of guesses."""
+    m = st.session_state.memory
+
+    st.subheader("💸 Log an expense")
+    with st.form(key=f"expense_form_{st.session_state.expense_form_nonce}", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        entry_date = c1.date_input("Date", value=date.today())
+        category = c2.selectbox("Category", mem.EXPENSE_CATEGORIES)
+        c3, c4 = st.columns([1, 2])
+        amount = c3.number_input("Amount (₹)", min_value=0.0, step=10.0, format="%.2f")
+        note = c4.text_input("Note (optional)", placeholder="e.g. auto fare to campus, mess bill for the week")
+        submitted = st.form_submit_button("➕ Log expense", use_container_width=True)
+        if submitted:
+            if amount <= 0:
+                st.warning("Enter an amount greater than ₹0.")
+            else:
+                st.session_state.memory = mem.add_expense(m, entry_date.isoformat(), category, amount, note)
+                mem.save_memory(MEMORY_PATH, st.session_state.memory)
+                st.session_state.expense_form_nonce += 1
+                st.toast("Expense logged!", icon="💸")
+                st.rerun()
+
+    st.divider()
+    budget_col, clear_col = st.columns([3, 1])
+    with budget_col:
+        budget_input = st.number_input(
+            "Monthly budget in ₹ (optional — gives your advisor a target to weigh spending against)",
+            min_value=0.0, step=100.0, value=float(m.get("monthly_budget") or 0.0), format="%.2f",
+        )
+        if budget_input != (m.get("monthly_budget") or 0.0):
+            st.session_state.memory = mem.set_monthly_budget(m, budget_input)
+            mem.save_memory(MEMORY_PATH, st.session_state.memory)
+    with clear_col:
+        st.write("")  # vertical spacer to align button with the input above
+        if st.button("↩️ Undo last", use_container_width=True) and m.get("expenses"):
+            st.session_state.memory = mem.delete_last_expense(m)
+            mem.save_memory(MEMORY_PATH, st.session_state.memory)
+            st.rerun()
+
+    st.subheader("📊 Spending summary")
+    window = st.radio("Window", ["Last 7 days", "Last 30 days", "Last 90 days"], index=1, horizontal=True)
+    days = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90}[window]
+    summary = mem.expense_summary(st.session_state.memory, days=days)
+
+    if summary["count"] == 0:
+        st.caption("Nothing logged in this window yet — log a few expenses above to see patterns here.")
+    else:
+        stat_html = f'<span class="stat-pill">💵 ₹{summary["total"]:.2f} total</span>'
+        stat_html += f'<span class="stat-pill">🧾 {summary["count"]} entries</span>'
+        budget = st.session_state.memory.get("monthly_budget")
+        if budget and days == 30:
+            pct = summary["total"] / budget if budget else 0
+            stat_html += f'<span class="stat-pill">🎯 {pct:.0%} of ₹{budget:.0f} budget</span>'
+        st.markdown(stat_html, unsafe_allow_html=True)
+
+        if budget and days == 30:
+            st.progress(min(1.0, summary["total"] / budget), text=f"₹{summary['total']:.2f} of ₹{budget:.2f} monthly budget")
+
+        st.bar_chart(summary["by_category"])
+
+        with st.expander("Recent entries"):
+            for e in sorted(mem.expenses_in_window(st.session_state.memory, days=days),
+                             key=lambda x: x["date"], reverse=True)[:25]:
+                note_part = f" — {e['note']}" if e.get("note") else ""
+                st.caption(f"{e['date']} · {e['category']} · ₹{e['amount']:.2f}{note_part}")
+
+    return mem.expense_summary_as_context(st.session_state.memory, days=30)
+
+
 # ----------------------------------------------------------------------------
-# Layout: Study/Focus modes get an extra Study Pack tab alongside chat
+# Layout: Study/Focus modes get an extra Study Pack tab; Financial Advisor
+# gets a Spending Tracker tab. Everyone else is just chat.
 # ----------------------------------------------------------------------------
 show_doc_hub = active_mode in ("Study Mode", "Deep Focus Mode")
+show_finance_hub = active_mode == "Financial Advisor"
 
 if show_doc_hub:
     tab_chat, tab_pack = st.tabs(["💬 Chat", "📚 Study Pack"])
@@ -597,5 +932,11 @@ if show_doc_hub:
         render_chat_panel(doc_context)
     with tab_pack:
         render_study_pack_tab()
+elif show_finance_hub:
+    tab_chat, tab_tracker = st.tabs(["💬 Chat", "💰 Spending Tracker"])
+    with tab_tracker:
+        spending_context = render_expense_tracker_tab()
+    with tab_chat:
+        render_chat_panel(spending_context)
 else:
     render_chat_panel("")
