@@ -1,0 +1,60 @@
+{
+  "facts": [],
+  "long_term_summary": "",
+  "stats": {
+    "total_messages": 41,
+    "quiz_correct": 0,
+    "quiz_total": 0,
+    "last_active": "2026-09-07",
+    "streak_days": 1
+  },
+  "expenses": [
+    {
+      "date": "2026-09-07",
+      "category": "Food & Groceries",
+      "amount": 20.0,
+      "note": "chips"
+    },
+    {
+      "date": "2026-09-07",
+      "category": "Subscriptions",
+      "amount": 200.0,
+      "note": "netflix"
+    },
+    {
+      "date": "2026-09-07",
+      "category": "Food & Groceries",
+      "amount": 40.0,
+      "note": "chips"
+    },
+    {
+      "date": "2026-09-07",
+      "category": "Subscriptions",
+      "amount": 200.0,
+      "note": "netflix"
+    },
+    {
+      "date": "2026-09-07",
+      "category": "Food & Groceries",
+      "amount": 40.0,
+      "note": ""
+    }
+  ],
+  "monthly_budget": null,
+  "calendar_events": [
+    {
+      "id": "7b1a2a0c",
+      "date": "2026-09-09",
+      "title": "CN assessment",
+      "note": "",
+      "pinned": false
+    },
+    {
+      "id": "03c3a4a2",
+      "date": "2026-09-07",
+      "title": "hackathon",
+      "note": "",
+      "pinned": false
+    }
+  ]
+}
